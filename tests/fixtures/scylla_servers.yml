@@ -1,0 +1,7 @@
+- targets:
+  - 10.0.1.10:9180
+  - 10.0.1.11:9180
+  - 10.0.1.12:9180
+  labels:
+    cluster: demo
+    job: scylla

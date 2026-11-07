@@ -1,0 +1,10 @@
+var/
+.venv/
+.deps/
+__pycache__/
+.pytest_cache/
+*.pyc
+.mypy_cache/
+*.arm.json
+infra/bicep/*.json
+.env

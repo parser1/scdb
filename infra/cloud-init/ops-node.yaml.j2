@@ -1,0 +1,47 @@
+#cloud-config
+package_update: true
+write_files:
+  - path: /opt/scylla-ops/manager.yaml
+    permissions: "0644"
+    content: |
+      http: 0.0.0.0:5080
+      database:
+        hosts:
+          - manager-db
+        replication_factor: 1
+  - path: /opt/scylla-ops/.env
+    permissions: "0600"
+    content: |
+      GRAFANA_PASSWORD={{ grafana_password }}
+      MANAGER_AGENT_TOKEN={{ agent_token }}
+  - path: /usr/local/sbin/scylla-ops-bootstrap
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y docker.io docker-compose-v2 git curl ca-certificates
+      systemctl enable --now docker
+      mkdir -p /var/lib/scylla-monitoring
+      echo '{{ compose_b64 }}' | base64 -d > /opt/scylla-ops/compose.yml
+      if [ ! -x /opt/scylla-monitoring/start-all.sh ]; then
+        rm -rf /opt/scylla-monitoring
+        git clone --depth 1 --branch {{ monitoring_ref }} {{ monitoring_repo }} /opt/scylla-monitoring
+      fi
+      cd /opt/scylla-ops
+      if [ "{{ manager_install }}" = "package" ]; then
+        mkdir -p /etc/apt/keyrings
+        gpg --homedir /tmp --no-default-keyring --keyring /tmp/scylla.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys {{ gpg_key }}
+        gpg --homedir /tmp --no-default-keyring --keyring /tmp/scylla.gpg --export --armor {{ gpg_key }} | gpg --dearmor -o /etc/apt/keyrings/scylladb.gpg
+        curl -fsSL -o /etc/apt/sources.list.d/scylla.list {{ scylla_list_url }}
+        curl -fsSL -o /etc/apt/sources.list.d/scylla-manager.list {{ manager_list_url }}
+        apt-get update
+        apt-get install -y scylla scylla-manager-server scylla-manager-client
+        scyllamgr_setup || true
+        systemctl enable --now scylla-manager
+      else
+        docker compose --env-file /opt/scylla-ops/.env up -d manager-db
+      fi
+runcmd:
+  - /usr/local/sbin/scylla-ops-bootstrap

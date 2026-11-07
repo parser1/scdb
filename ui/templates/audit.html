@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block body %}
+<section>
+  <h1>Audit</h1>
+  <p class="lede">Operator and worker actions. CQL statements typed by a client are not in this log.</p>
+  <div class="card">
+  <table>
+    <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Outcome</th><th>Severity</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  </div>
+  <p id="form-error" class="error"></p>
+</section>
+{% endblock %}
+{% block script %}
+<script>
+  async function refresh() {
+    const error = document.getElementById("form-error");
+    try {
+      const events = await api("/api/v1/audit?limit=100");
+      const body = document.getElementById("rows");
+      body.innerHTML = "";
+      for (const event of events) {
+        const row = document.createElement("tr");
+        for (const value of [event.at, event.actor, event.action, event.outcome, event.severity]) {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          row.appendChild(cell);
+        }
+        body.appendChild(row);
+      }
+    } catch (err) {
+      error.textContent = err.message;
+    }
+  }
+  refresh();
+</script>
+{% endblock %}

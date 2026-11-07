@@ -1,0 +1,14 @@
+services:
+  manager-db:
+    image: scylladb/scylla:2026.3
+    command: ["--smp", "1", "--memory", "1G", "--overprovisioned", "1", "--developer-mode", "1"]
+    ports:
+      - "127.0.0.1:9042:9042"
+  manager:
+    image: scylladb/scylla-manager:3.13.0
+    depends_on:
+      - manager-db
+    ports:
+      - "5080:5080"
+    volumes:
+      - ./manager.yaml:/etc/scylla-manager/scylla-manager.yaml:ro

@@ -1,0 +1,15 @@
+# Build context for the control-plane image. The ops VM compose file is copied
+# in; this ignore list only shrinks the build sent to Docker.
+.git
+.venv
+.deps
+var
+**/__pycache__
+.pytest_cache
+.mypy_cache
+tests
+docs
+.github
+*.md
+.env
+infra/bicep/*.json

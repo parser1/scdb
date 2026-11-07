@@ -1,0 +1,122 @@
+#cloud-config
+package_update: true
+write_files:
+  - path: /usr/local/sbin/scylla-dbaas-bootstrap
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      mkdir -p /etc/apt/keyrings /var/lib/scylla
+      gpg --homedir /tmp --no-default-keyring --keyring /tmp/scylla.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys {{ gpg_key }}
+      gpg --homedir /tmp --no-default-keyring --keyring /tmp/scylla.gpg --export --armor {{ gpg_key }} | gpg --dearmor -o /etc/apt/keyrings/scylladb.gpg
+      curl -fsSL -o /etc/apt/sources.list.d/scylla.list {{ scylla_list_url }}
+      curl -fsSL -o /etc/apt/sources.list.d/scylla-manager.list {{ manager_list_url }}
+      apt-get update
+      apt-get install -y scylla scylla-manager-agent scylla-node-exporter xfsprogs
+      apt-get install -y azure-vm-utils || true
+      udevadm settle || true
+      DISK=""
+      for candidate in /dev/disk/azure/scsi1/lun0 /dev/disk/azure/data/by-lun/0 /dev/disk/azure/data/by-lun/lun0; do
+        if [ -e "$candidate" ]; then
+          resolved=$(readlink -f "$candidate")
+          if [ -b "$resolved" ]; then
+            DISK=$resolved
+            break
+          fi
+        fi
+      done
+      if [ -z "$DISK" ]; then
+        root_src=$(findmnt -n -o SOURCE / || true)
+        root_disk=""
+        if [ -n "$root_src" ]; then
+          root_disk=$(lsblk -no PKNAME "$root_src" 2>/dev/null | head -n1 || true)
+          if [ -z "$root_disk" ]; then
+            root_disk=$(basename "$root_src")
+            root_disk=${root_disk%%p[0-9]*}
+          fi
+        fi
+        want=$(( {{ data_disk_gb }} * 1024 * 1024 * 1024 ))
+        best=""
+        best_delta=""
+        for dev in /dev/nvme*n* /dev/sd*; do
+          [ -b "$dev" ] || continue
+          base=$(basename "$dev")
+          case "$base" in
+            *p[0-9]*) continue ;;
+          esac
+          [ "$base" = "$root_disk" ] && continue
+          if [ -e /dev/disk/azure/resource ] && [ "$(readlink -f /dev/disk/azure/resource)" = "$(readlink -f "$dev")" ]; then
+            continue
+          fi
+          if [ -e /dev/disk/azure/local ] && [ "$(readlink -f /dev/disk/azure/local)" = "$(readlink -f "$dev")" ]; then
+            continue
+          fi
+          size=$(lsblk -b -dn -o SIZE "$dev" | tr -d ' ')
+          [ -n "$size" ] || continue
+          if [ "$size" -gt "$want" ]; then
+            delta=$(( size - want ))
+          else
+            delta=$(( want - size ))
+          fi
+          limit=$(( want / 20 ))
+          [ "$delta" -le "$limit" ] || continue
+          if [ -z "$best" ] || [ "$delta" -lt "$best_delta" ]; then
+            best=$(readlink -f "$dev")
+            best_delta=$delta
+          fi
+        done
+        DISK=$best
+      fi
+      if [ -n "$DISK" ] && ! blkid "$DISK" >/dev/null 2>&1; then
+        mkfs.xfs -f "$DISK"
+      fi
+      if [ -n "$DISK" ]; then
+        UUID=$(blkid -s UUID -o value "$DISK")
+        grep -q /var/lib/scylla /etc/fstab || echo "UUID=${UUID} /var/lib/scylla xfs noatime 0 2" >> /etc/fstab
+        mountpoint -q /var/lib/scylla || mount /var/lib/scylla || true
+      fi
+      mkdir -p /var/lib/scylla/data /var/lib/scylla/commitlog /etc/scylla /etc/scylla-manager-agent
+      cat > /etc/scylla/scylla.yaml <<'EOF'
+      cluster_name: '{{ cluster_name }}'
+      listen_address: {{ private_ip }}
+      rpc_address: {{ private_ip }}
+      broadcast_rpc_address: {{ private_ip }}
+      api_address: 127.0.0.1
+      endpoint_snitch: GossipingPropertyFileSnitch
+      authenticator: PasswordAuthenticator
+      authorizer: CassandraAuthorizer
+      maintenance_socket: /var/lib/scylla/cql.m
+      data_file_directories:
+        - /var/lib/scylla/data
+      commitlog_directory: /var/lib/scylla/commitlog
+      seed_provider:
+        - class_name: org.apache.cassandra.locator.SimpleSeedProvider
+          parameters:
+            - seeds: "{{ seeds }}"
+      {% if replace_value %}
+      {{ replace_flag }}: {{ replace_value }}
+      {% endif %}
+      EOF
+      printf 'dc=datacenter1\nrack=rack1\nprefer_local=true\n' > /etc/scylla/cassandra-rackdc.properties
+      cat > /etc/scylla-manager-agent/scylla-manager-agent.yaml <<'EOF'
+      auth_token: {{ agent_token }}
+      azure:
+        account: {{ storage_account }}
+      EOF
+      IO=standard
+      # --disks and --no-raid-setup are mutually exclusive in Scylla 2026.3.
+      # A failed setup used to leave /var/lib/scylla owned by root, and the
+      # scylla user then cannot create the commitlog.
+      if [ -z "$DISK" ] || ! timeout 180 scylla_setup --no-ec2-check --no-kernel-check --no-ntp-setup --no-coredump-setup --no-sysconfig-setup --no-cpuscaling-setup --no-fstrim-setup --no-rsyslog-setup --no-version-check --disks "$DISK"; then
+        printf '\ndeveloper_mode: true\n' >> /etc/scylla/scylla.yaml
+        IO=demo
+      fi
+      chown -R scylla:scylla /var/lib/scylla
+      echo "$IO" > /var/lib/scylla-dbaas-io-profile
+      systemctl enable scylla-server scylla-manager-agent scylla-node-exporter
+      systemctl restart scylla-server
+      systemctl restart scylla-manager-agent
+      systemctl restart scylla-node-exporter
+runcmd:
+  - /usr/local/sbin/scylla-dbaas-bootstrap

@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ScyllaDB on Azure — plan briefing</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1c1915;
+      --muted: #5c564c;
+      --line: #e4ddd2;
+      --paper: #faf7f2;
+      --card: #fff;
+      --accent: #0f6e56;
+      --warn: #8a4b08;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 16px/1.5 "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    main { max-width: 880px; margin: 0 auto; padding: 48px 24px 80px; }
+    h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 8px; }
+    h2 { font-size: 1.25rem; margin: 2.2rem 0 0.6rem; }
+    p { margin: 0.4rem 0 0.8rem; }
+    .lede { font-size: 1.15rem; }
+    .meta { color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; font-size: 0.85rem; }
+    a { color: var(--accent); }
+    table { width: 100%; border-collapse: collapse; background: var(--card); margin: 0.6rem 0 1rem; }
+    th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); font-family: ui-sans-serif, system-ui, sans-serif; font-size: 0.92rem; }
+    th { font-size: 0.75rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+    .map { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin: 12px 0 4px; }
+    .box { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+    .box h3 { margin: 0 0 6px; font-size: 0.95rem; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .box ul { margin: 0; padding-left: 1.1rem; }
+    .box li { margin: 0.15rem 0; }
+    .span2 { grid-column: span 2; }
+    .note { border-left: 3px solid var(--warn); padding: 4px 0 4px 12px; color: var(--ink); }
+    ol.steps { padding-left: 1.2rem; }
+    ol.steps li { margin: 0.25rem 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
+    @media (max-width: 720px) {
+      .map { grid-template-columns: 1fr; }
+      .span2 { grid-column: auto; }
+    }
+    @media print {
+      body { background: white; }
+      main { padding: 0; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="meta">Plan briefing · 5 Nov 2026 · control plane implemented, no live Azure cluster yet</p>
+    <h1>A small ScyllaDB service on Azure</h1>
+    <p class="lede">One operator creates a 3-node ScyllaDB cluster from a web page, writes a row, backs it up to Azure Blob, restores it, and recovers from a single dead VM. Scylla Manager and Grafana run as Docker on a fourth VM.</p>
+    <p class="meta">Source of truth: <a href="README.md">docs/README.md</a>. This page is the picture; the markdown is the contract.</p>
+
+    <h2>Layout</h2>
+    <div class="map">
+      <div class="box">
+        <h3>Control plane</h3>
+        <ul>
+          <li>Python API, UI, and worker</li>
+          <li>SQLite for intent, progress, audit</li>
+          <li>Runs on the operator laptop for the demo</li>
+        </ul>
+      </div>
+      <div class="box">
+        <h3>Ops VM · 10.0.1.4</h3>
+        <ul>
+          <li>Scylla container for Manager's own data</li>
+          <li>Scylla Manager</li>
+          <li>Prometheus, Grafana, Alertmanager, Loki</li>
+        </ul>
+      </div>
+      <div class="box">
+        <h3>Data nodes</h3>
+        <ul>
+          <li>10.0.1.10 · .11 · .12</li>
+          <li>Ubuntu 24.04, Scylla, Manager agent</li>
+          <li>RF=3, one datacenter</li>
+        </ul>
+      </div>
+      <div class="box span2">
+        <h3>Backup resource group</h3>
+        <p>Blob container <code>scylla-backup</code>. Data-node managed identities upload snapshots. This group survives cluster delete for 7 days.</p>
+      </div>
+      <div class="box">
+        <h3>Not on the internet</h3>
+        <p>Gossip, metrics, and the Manager agent listen on the private subnet. CQL and Grafana allow the operator IP only.</p>
+      </div>
+    </div>
+
+    <h2>Build versus reuse</h2>
+    <table>
+      <thead><tr><th>We build</th><th>We call</th></tr></thead>
+      <tbody>
+        <tr><td>API, UI, operation runner, audit, health decisions, Bicep and cloud-init</td><td>Scylla join and streaming, Manager backup / restore / repair, upstream Grafana dashboards, Azure VM Run Command</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Create path</h2>
+    <ol class="steps">
+      <li>API accepts a name and returns an operation id.</li>
+      <li>Worker creates network, backup storage, identity, and NICs with fixed private IPs.</li>
+      <li>Ops VM comes up. Node 0 comes up and answers CQL. Nodes 1 and 2 join.</li>
+      <li>Worker stores host ids, creates CQL roles, points agents at the storage account, registers Manager, starts Grafana.</li>
+      <li>Daily backup and weekly repair schedules exist. Status becomes ready.</li>
+    </ol>
+
+    <h2>When a node dies</h2>
+    <table>
+      <thead><tr><th>What we see</th><th>What we do</th></tr></thead>
+      <tbody>
+        <tr><td>VM stopped, or Scylla not answering, peers healthy</td><td>Start the VM or restart the service</td></tr>
+        <tr><td>VM gone, the other two are up</td><td>New VM on the same NIC and IP, Scylla replace-boot, then a Manager repair</td></tr>
+        <tr><td>Two data nodes unhealthy</td><td>Do nothing automatic. Mark the cluster degraded and audit it as critical</td></tr>
+      </tbody>
+    </table>
+    <p class="note">Replacing a node without quorum can throw away the only remaining copy of a write. The freeze is the safety rule.</p>
+
+    <h2>Trade-offs we already accepted</h2>
+    <table>
+      <thead><tr><th>Choice</th><th>Why, for this homework</th></tr></thead>
+      <tbody>
+        <tr><td>Laptop control plane and SQLite</td><td>A hosted control plane would delay the first real node</td></tr>
+        <tr><td>Bicep modules, worker applies them</td><td>Reviewable layout, and node replace can target one NIC</td></tr>
+        <tr><td>Fixed 3 nodes</td><td>The assignment is a 3 VM cluster. Elastic scale is a different project</td></tr>
+        <tr><td>D-series and Premium SSD</td><td>Local NVMe is the production shape and the wrong cost for a demo</td></tr>
+        <tr><td>Manager in Docker, package install as fallback</td><td>The assignment asks for Docker. Upstream documents apt. Either may win after one real boot</td></tr>
+        <tr><td>Restore into the same cluster</td><td>A shadow cluster doubles the demo bill. The button says it overwrites keyspace demo</td></tr>
+        <tr><td>Shared API key</td><td>Entra ID does not teach us anything about the database</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Task order</h2>
+    <table>
+      <thead><tr><th>Block</th><th>Tasks</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>Foundation</td><td>T01–T05</td><td>API, database, worker, fake cloud</td></tr>
+        <tr><td>Images and templates</td><td>T06–T11</td><td>Bicep, cloud-init, compose, pinned versions</td></tr>
+        <tr><td>Demo checkpoint</td><td>T12–T16</td><td>Real create/delete, UI, CQL client</td></tr>
+        <tr><td>Homework remainder</td><td>T17–T24</td><td>Recovery, backup, restore, audit, CI, runbook</td></tr>
+        <tr><td>Live proof</td><td>T25–T28</td><td>Create, kill a node, restore, delete, in a browser</td></tr>
+      </tbody>
+    </table>
+    <p>The checkpoint is not the finish line. Failure recovery and backup restore are still ahead of it. Details and acceptance lines are in <a href="tasks/backlog.md">the backlog</a>. Agent split is in <a href="tasks/agent-briefs.md">the briefs</a>.</p>
+
+    <h2>Known gaps</h2>
+    <ul>
+      <li>The control plane, templates, and tests are in the repo. No live Azure cluster has been created.</li>
+      <li>Scylla package URL, Manager image tag, and the replace boot flag are confirmed in T11, not guessed here.</li>
+      <li>Dollar cost is computed on the day the SKU is pinned.</li>
+      <li>The 256 GiB data disk may force Scylla developer mode. The cluster record will say so.</li>
+      <li>Health automation is slower than Grafana, because it uses Azure Run Command.</li>
+      <li>No TLS, no multi-zone RF, no Entra ID, no second cluster. Named on purpose in the limitations doc.</li>
+    </ul>
+  </main>
+</body>
+</html>

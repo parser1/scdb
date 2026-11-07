@@ -1,0 +1,5 @@
+http: 0.0.0.0:5080
+database:
+  hosts:
+    - manager-db
+  replication_factor: 1

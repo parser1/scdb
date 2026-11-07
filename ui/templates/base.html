@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page }} · Scylla DBaaS</title>
+  <link rel="stylesheet" href="/static/app.css?v=6">
+</head>
+<body>
+  <header>
+    <a class="brand" href="/">Scylla DBaaS</a>
+    <nav>
+      <a href="/">Clusters</a>
+      <a href="/audit">Audit</a>
+    </nav>
+    <form id="key-form">
+      <label>API key <input id="api-key" type="password" autocomplete="off" placeholder="dev"></label>
+      <button type="submit">Save</button>
+    </form>
+  </header>
+  <main>
+    {% block body %}{% endblock %}
+  </main>
+  <script src="/static/app.js"></script>
+  {% block script %}{% endblock %}
+</body>
+</html>

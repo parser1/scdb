@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block body %}
+<section>
+  <h1>Clusters</h1>
+  <p class="lede">One 3-node ScyllaDB cluster. Create it here. The worker talks to Azure only when the process was started with <code>CLOUD=azure</code>.</p>
+  <div id="clusters" class="cluster-list"></div>
+  <div class="card">
+    <h2>Create</h2>
+    <form id="create-form">
+      <label>Name <input name="name" required pattern="[a-z0-9-]{1,32}" placeholder="demo"></label>
+      <label>Region <input name="location" value="eastus" required pattern="[a-z0-9]{1,32}"></label>
+      <button type="submit">Create cluster</button>
+    </form>
+    <p id="form-error" class="error"></p>
+  </div>
+  <div class="card">
+    <h2>Orphan resource groups</h2>
+    <p class="muted">Tagged groups this database does not recognize. Nothing here is deleted automatically.</p>
+    <ul id="orphans"></ul>
+  </div>
+</section>
+{% endblock %}
+{% block script %}
+<script>
+  function pillClass(status) {
+    if (status === "ready") return "ok";
+    if (status === "error" || status === "degraded") return "bad";
+    if (status === "deleting") return "warn";
+    return "info";
+  }
+  document.getElementById("create-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const error = document.getElementById("form-error");
+    error.textContent = "";
+    try {
+      const body = await api("/api/v1/clusters", {
+        method: "POST",
+        body: JSON.stringify({
+          name: form.name.value,
+          location: form.location.value || "eastus",
+        }),
+      });
+      location.href = "/clusters/" + body.cluster.id;
+    } catch (err) {
+      error.textContent = err.message;
+    }
+  });
+  async function refresh() {
+    const error = document.getElementById("form-error");
+    try {
+      const clusters = await api("/api/v1/clusters");
+      const host = document.getElementById("clusters");
+      host.innerHTML = clusters.length ? "" : "<p class='muted'>No cluster yet.</p>";
+      for (const cluster of clusters) {
+        const link = document.createElement("a");
+        link.href = "/clusters/" + cluster.id;
+        const name = document.createElement("strong");
+        name.textContent = cluster.name;
+        const meta = document.createElement("span");
+        meta.className = "pill " + pillClass(cluster.status);
+        const step = cluster.operation ? (cluster.operation.step || cluster.operation.status) : cluster.location;
+        meta.textContent = cluster.status + (step ? " · " + step : "");
+        link.append(name, meta);
+        host.appendChild(link);
+      }
+      const orphans = await api("/api/v1/orphans");
+      const list = document.getElementById("orphans");
+      list.innerHTML = "";
+      for (const name of orphans) {
+        const item = document.createElement("li");
+        item.textContent = name;
+        list.appendChild(item);
+      }
+      if (!orphans.length) {
+        list.innerHTML = "<li class='muted'>None</li>";
+      }
+    } catch (err) {
+      error.textContent = err.message;
+    }
+  }
+  refresh();
+</script>
+{% endblock %}

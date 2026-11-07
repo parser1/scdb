@@ -1,0 +1,357 @@
+{% extends "base.html" %}
+{% block body %}
+<section data-cluster="{{ cluster_id }}">
+  <p><a class="back" href="/">← Clusters</a></p>
+  <div class="hero">
+    <div>
+      <h1 id="title">Cluster</h1>
+      <div id="status" class="pills"></div>
+      <p id="links"></p>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Nodes</h2>
+    <table>
+      <thead><tr><th>Role</th><th>Address</th><th>Status</th><th></th></tr></thead>
+      <tbody id="nodes"></tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h2>Operation</h2>
+    <div class="operation-layout">
+      <div>
+        <ol id="operation-steps" class="steps"></ol>
+        <p id="operation" class="muted"></p>
+      </div>
+      <div id="azure-commands" class="command-log" aria-live="polite"><p class="muted">Azure commands appear here while an operation runs.</p></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Logs</h2>
+    <p class="muted" id="logs-hint">Select Logs on a node. A tab loads only while it is selected.</p>
+    <div id="logs-panel" hidden>
+      <p id="logs-node"></p>
+      <div id="logs-tabs"></div>
+      <p><button type="button" id="logs-refresh">Refresh</button></p>
+      <pre id="logs-text"></pre>
+    </div>
+  </div>
+  <div class="card">
+    <h2>CQL</h2>
+    <pre id="cql">Available when the cluster is ready.</pre>
+  </div>
+  <div class="card">
+    <h2>Backup</h2>
+    <p class="warn">This restore overwrites keyspace demo in place.</p>
+    <p id="backup"></p>
+    <form id="backup-form"><button type="submit">Back up now</button></form>
+    <form id="restore-form">
+      <label>Confirm with the cluster name <input name="confirm" required></label>
+      <button type="submit">Restore latest backup</button>
+    </form>
+  </div>
+  <div class="card">
+    <h2>Delete</h2>
+    <form id="delete-form">
+      <label>Type the cluster name <input name="confirm" required></label>
+      <label class="check"><input type="checkbox" name="delete_backups"> Delete backups now</label>
+      <button type="submit">Delete cluster</button>
+    </form>
+  </div>
+  <p id="form-error" class="error"></p>
+</section>
+{% endblock %}
+{% block script %}
+<script>
+  function pillClass(status) {
+    if (status === "ready" || status === "up") return "ok";
+    if (status === "error" || status === "degraded" || status === "down") return "bad";
+    if (status === "deleting" || status === "provisioning") return "warn";
+    return "info";
+  }
+  const clusterId = document.querySelector("[data-cluster]").dataset.cluster;
+  const error = document.getElementById("form-error");
+  let latestBackup = null;
+  let clusterName = "";
+
+  const STEP_LISTS = {
+    create_cluster: ["validate", "create_groups", "create_network", "create_backup_storage", "create_identity", "create_nics", "create_ops_vm", "create_node0", "create_node1_node2", "capture_host_ids", "configure_auth", "configure_agents", "register_manager", "configure_monitoring", "schedule_tasks", "ready"],
+    delete_cluster: ["validate", "stop_schedules", "delete_vms", "delete_compute_group", "retain_backups", "deleted"],
+    restart_node: ["systemctl_restart", "verify"],
+    replace_node: ["detach", "deploy", "wait_un", "refresh_monitoring", "repair", "verify"],
+    backup: ["start", "poll", "record"],
+    restore: ["quiesce", "restore", "verify", "ready"],
+  };
+  const STEP_LABELS = {
+    validate: "Validate",
+    create_groups: "Create resource groups",
+    create_network: "Create network",
+    create_backup_storage: "Create backup storage",
+    create_identity: "Create identity",
+    create_nics: "Create network interfaces",
+    create_ops_vm: "Create ops VM",
+    create_node0: "Create node 0",
+    create_node1_node2: "Create nodes 1 and 2",
+    capture_host_ids: "Capture host ids",
+    configure_auth: "Configure auth",
+    configure_agents: "Configure agents",
+    register_manager: "Register Manager",
+    configure_monitoring: "Configure monitoring",
+    schedule_tasks: "Schedule tasks",
+    ready: "Ready",
+    stop_schedules: "Stop schedules",
+    delete_vms: "Delete VMs",
+    delete_compute_group: "Delete compute group",
+    retain_backups: "Retain backups",
+    deleted: "Deleted",
+    start_vm: "Start VM",
+    systemctl_restart: "Restart Scylla",
+    verify: "Verify",
+    detach: "Detach node",
+    deploy: "Deploy replacement",
+    wait_un: "Wait until UN",
+    refresh_monitoring: "Refresh monitoring",
+    repair: "Repair",
+    start: "Start backup",
+    poll: "Wait for backup",
+    record: "Record backup",
+    quiesce: "Quiesce",
+    restore: "Restore",
+  };
+
+  function renderOperation(op) {
+    const list = document.getElementById("operation-steps");
+    const note = document.getElementById("operation");
+    list.innerHTML = "";
+    if (!op) {
+      note.textContent = "None";
+      return;
+    }
+    let names = (STEP_LISTS[op.type] || []).slice();
+    if (op.step === "start_vm") names = ["start_vm", ...names];
+    if (op.step && !names.includes(op.step)) names.push(op.step);
+    let index = names.indexOf(op.step);
+    if (op.status === "succeeded") index = names.length;
+    if (index < 0) index = 0;
+    for (let i = 0; i < names.length; i++) {
+      const item = document.createElement("li");
+      const icon = document.createElement("span");
+      if (i < index || op.status === "succeeded") {
+        icon.className = "step-icon done";
+        icon.textContent = "✓";
+      } else if (op.status === "failed" && i === index) {
+        icon.className = "step-icon bad";
+        icon.textContent = "×";
+      } else if (i === index && (op.status === "running" || op.status === "queued")) {
+        icon.className = "step-icon spin";
+        icon.setAttribute("aria-label", "working");
+      } else {
+        icon.className = "step-icon wait";
+      }
+      const label = document.createElement("span");
+      label.textContent = STEP_LABELS[names[i]] || names[i].replaceAll("_", " ");
+      item.append(icon, label);
+      list.appendChild(item);
+    }
+    note.textContent = op.error_message || op.type.replaceAll("_", " ");
+  }
+
+  function renderCommands(commands) {
+    const pane = document.getElementById("azure-commands");
+    const nearBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 48;
+    pane.innerHTML = "";
+    if (!commands || !commands.length) {
+      const empty = document.createElement("p");
+      empty.className = "muted";
+      empty.textContent = "Azure commands appear here while an operation runs.";
+      pane.appendChild(empty);
+      return;
+    }
+    for (const item of commands) {
+      const block = document.createElement("article");
+      const title = document.createElement("p");
+      title.className = "cmd-title" + (item.ok ? "" : " bad");
+      title.textContent = item.command;
+      const body = document.createElement("pre");
+      body.textContent = item.result || (item.ok ? "" : "failed");
+      block.append(title, body);
+      pane.appendChild(block);
+    }
+    if (nearBottom) pane.scrollTop = pane.scrollHeight;
+  }
+
+  const LOG_TABS = {
+    data: [["cloud-init", "Cloud-init"], ["scylla", "Scylla"], ["agent", "Manager agent"]],
+    ops: [["cloud-init", "Cloud-init"], ["docker", "Docker"]],
+  };
+  let logsNode = null;
+  let logsSource = "";
+  let logsSeq = 0;
+
+  function buttonRow(node) {
+    const cell = document.createElement("td");
+    const logs = document.createElement("button");
+    logs.type = "button";
+    logs.textContent = "Logs";
+    logs.addEventListener("click", () => openLogs(node));
+    cell.append(logs);
+    if (node.role !== "data") return cell;
+    const restart = document.createElement("button");
+    restart.textContent = "Restart";
+    restart.addEventListener("click", () => act(`/api/v1/clusters/${clusterId}/nodes/${node.id}/restart`));
+    const replace = document.createElement("button");
+    replace.textContent = "Replace";
+    replace.addEventListener("click", () => act(`/api/v1/clusters/${clusterId}/nodes/${node.id}/replacement`));
+    cell.append(restart, replace);
+    return cell;
+  }
+
+  async function loadLogs() {
+    if (!logsNode || !logsSource) return;
+    const seq = ++logsSeq;
+    const pre = document.getElementById("logs-text");
+    pre.textContent = "Loading…";
+    try {
+      const body = await api(`/api/v1/clusters/${clusterId}/nodes/${logsNode.id}/logs?source=${logsSource}`);
+      if (seq !== logsSeq) return;
+      pre.textContent = body.text || "(empty)";
+    } catch (err) {
+      if (seq !== logsSeq) return;
+      pre.textContent = err.message;
+    }
+  }
+
+  function openLogs(node) {
+    logsNode = node;
+    const tabs = LOG_TABS[node.role] || LOG_TABS.data;
+    logsSource = tabs[0][0];
+    document.getElementById("logs-hint").hidden = true;
+    document.getElementById("logs-panel").hidden = false;
+    document.getElementById("logs-node").textContent = `${node.role} ${node.vm_name || node.private_ip || node.id}`;
+    const bar = document.getElementById("logs-tabs");
+    bar.innerHTML = "";
+    for (const [id, label] of tabs) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.dataset.source = id;
+      button.className = id === logsSource ? "tab-on" : "";
+      button.addEventListener("click", () => {
+        if (logsSource === id) return;
+        logsSource = id;
+        for (const item of bar.querySelectorAll("button")) {
+          item.className = item.dataset.source === id ? "tab-on" : "";
+        }
+        loadLogs();
+      });
+      bar.appendChild(button);
+    }
+    loadLogs();
+  }
+
+  async function act(path, body) {
+    error.textContent = "";
+    try {
+      await api(path, { method: "POST", body: body ? JSON.stringify(body) : "{}" });
+      await refresh();
+    } catch (err) {
+      error.textContent = err.message;
+    }
+  }
+
+  async function refresh() {
+    try {
+      const cluster = await api("/api/v1/clusters/" + clusterId);
+      clusterName = cluster.name;
+      document.getElementById("title").textContent = cluster.name;
+      const health = await api("/api/v1/clusters/" + clusterId + "/health");
+      const status = document.getElementById("status");
+      status.innerHTML = "";
+      for (const [label, kind] of [
+        [cluster.status, pillClass(cluster.status)],
+        ["automation " + health.automation, health.automation === "frozen" ? "bad" : "ok"],
+        ["ops " + health.ops_status, health.ops_status === "up" ? "ok" : "bad"],
+      ]) {
+        const pill = document.createElement("span");
+        pill.className = "pill " + kind;
+        pill.textContent = label;
+        status.appendChild(pill);
+      }
+      const links = document.getElementById("links");
+      links.innerHTML = "";
+      if (cluster.grafana_url) {
+        const link = document.createElement("a");
+        link.className = "grafana";
+        link.href = cluster.grafana_url;
+        link.textContent = "Open Grafana";
+        link.target = "_blank";
+        links.appendChild(link);
+      }
+      const tbody = document.getElementById("nodes");
+      tbody.innerHTML = "";
+      for (const node of cluster.nodes) {
+        const row = document.createElement("tr");
+        const role = document.createElement("td");
+        role.textContent = node.role;
+        const address = document.createElement("td");
+        address.textContent = node.public_ip || node.private_ip || "";
+        const state = document.createElement("td");
+        const pill = document.createElement("span");
+        pill.className = "pill " + pillClass(node.status);
+        pill.textContent = node.status;
+        state.appendChild(pill);
+        row.append(role, address, state);
+        const actions = buttonRow(node);
+        actions.className = "actions";
+        if (health.automation === "frozen") {
+          actions.querySelectorAll("button").forEach((button) => {
+            if (button.textContent === "Logs") return;
+            button.disabled = true;
+            button.title = "Automation is frozen because quorum is lost";
+          });
+        }
+        row.appendChild(actions);
+        tbody.appendChild(row);
+      }
+      const cql = document.getElementById("cql");
+      cql.textContent = cluster.cql
+        ? `${cluster.cql.username}@${cluster.cql.host}:${cluster.cql.port} keyspace ${cluster.cql.keyspace}\npassword ${cluster.cql.password}`
+        : "Available when the cluster is ready.";
+      latestBackup = cluster.latest_backup;
+      document.getElementById("backup").textContent = latestBackup
+        ? `${latestBackup.status} ${latestBackup.location || ""} ${latestBackup.note || ""}`
+        : "No backup yet.";
+      renderOperation(cluster.operation);
+      renderCommands(cluster.azure_commands);
+    } catch (err) {
+      error.textContent = err.message;
+    }
+  }
+
+  document.getElementById("logs-refresh").addEventListener("click", () => loadLogs());
+  document.getElementById("backup-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    act(`/api/v1/clusters/${clusterId}/backups`);
+  });
+  document.getElementById("restore-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!latestBackup) {
+      error.textContent = "No backup to restore";
+      return;
+    }
+    act(`/api/v1/clusters/${clusterId}/restores`, {
+      backup_id: latestBackup.id,
+      confirm: event.target.confirm.value,
+    });
+  });
+  document.getElementById("delete-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    act(`/api/v1/clusters/${clusterId}/deletion`, {
+      confirm: event.target.confirm.value,
+      delete_backups: event.target.delete_backups.checked,
+    });
+  });
+  refresh();
+  setInterval(refresh, 5000);
+</script>
+{% endblock %}
